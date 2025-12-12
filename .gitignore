@@ -1,0 +1,6 @@
+.zig-cache/
+zig-out/
+*.db*
+*.wal
+*node_modules/
+src/static/dist/
