@@ -49,7 +49,8 @@ pub fn Wal(comptime T: type) type {
 
             while (try reader.interface.takeDelimiter('\n')) |line| {
                 if (line.len == 0) continue;
-                const parsed = try std.json.parseFromSliceLeaky(T, arena, line, .{ .ignore_unknown_fields = true });
+                const owned_line = try arena.dupe(u8, line);
+                const parsed = try std.json.parseFromSliceLeaky(T, arena, owned_line, .{ .ignore_unknown_fields = true });
                 try list.append(arena, parsed);
             }
             return list;
