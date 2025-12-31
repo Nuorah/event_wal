@@ -42,18 +42,8 @@ pub fn Wal(comptime T: type) type {
             try self.file.sync();
         }
 
-        pub fn readAll(self: *Self, allocator: std.mem.Allocator) !std.ArrayList(T) {
-            var list: std.ArrayList(T) = .empty;
-            var reader_buffer: [4096]u8 = undefined;
-            var reader = self.file.reader(&reader_buffer);
-
-            while (try reader.interface.takeDelimiter('\n')) |line| {
-                if (line.len == 0) continue;
-                const parsed = try std.json.parseFromSlice(T, allocator, line, .{ .ignore_unknown_fields = true });
-                defer parsed.deinit();
-                try list.append(allocator, parsed.value);
-            }
-            return list;
+        pub fn reader(self: *Self, buffer: []u8) std.fs.File.Reader {
+            return self.file.reader(buffer);
         }
     };
 }
