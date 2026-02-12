@@ -68,7 +68,7 @@ pub fn Wal(comptime T: type, version: u8) type {
 
             var events: std.ArrayList(Event(T)) = .empty;
 
-            while (reader.interface.takeDelimiter('\n')) |line| {
+            while (try reader.interface.takeDelimiter('\n')) |line| {
                 if (line.len == 0) continue;
                 const owned_line = try arena.dupe(u8, line);
                 const parsed = try std.json.parseFromSliceLeaky(
@@ -82,8 +82,6 @@ pub fn Wal(comptime T: type, version: u8) type {
                     .timestamp = parsed.timestamp * 1_000_000,
                     .data = parsed.data,
                 });
-            } else |err| {
-                if (err != error.EndOfStream) return err;
             }
 
             // write to tmp file
