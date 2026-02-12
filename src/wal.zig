@@ -38,6 +38,7 @@ pub fn Wal(comptime T: type, version: u8) type {
             if (bytes_read == 0) {
                 try writer.interface.writeAll(&MAGIC);
                 try writer.interface.writeByte(version);
+                try writer.interface.flush();
                 try file.sync();
             } else if (bytes_read >= HEADER_SIZE and std.mem.eql(u8, header_buf[0..MAGIC.len], &MAGIC)) {
                 if (header_buf[MAGIC.len] != version) {
@@ -93,6 +94,7 @@ pub fn Wal(comptime T: type, version: u8) type {
 
             try writer.interface.writeAll(&MAGIC);
             try writer.interface.writeByte(version);
+            try writer.interface.flush();
             try tmp_file.sync();
 
             // write each event as binary
