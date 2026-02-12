@@ -140,7 +140,7 @@ pub fn Wal(comptime T: type, version: u8) type {
             std.mem.writeInt(u16, content[8..10], @intFromEnum(data), .little);
             @memcpy(content[10..], payload);
 
-            const crc = std.hash.crc.Crc32SmallWithPoly(.IEEE).hash(content);
+            const crc = std.hash.crc.Crc32.hash(content);
 
             var writer_buffer: [128]u8 = undefined;
             var writer = self.file.writer(&writer_buffer);
@@ -199,7 +199,7 @@ pub fn Wal(comptime T: type, version: u8) type {
                 // read and verify crc
                 const crc_bytes = try reader.interface.take(4);
                 const stored_crc = std.mem.readInt(u32, crc_bytes[0..4], .little);
-                const computed_crc = std.hash.crc.Crc32SmallWithPoly(.IEEE).hash(content);
+                const computed_crc = std.hash.crc.Crc32.hash(content);
                 if (stored_crc != computed_crc) return error.CrcMismatch;
 
                 // parse timestamp
