@@ -1,5 +1,7 @@
 const std = @import("std");
 
+const walSerialize = @import("serialize.zig").walSerialize;
+const walDeserialize = @import("serialize.zig").walDeserialize;
 const Event = @import("event.zig").Event;
 
 pub fn Wal(comptime T: type, version: u8) type {
@@ -129,7 +131,7 @@ pub fn Wal(comptime T: type, version: u8) type {
 
         fn appendBinaryWithTimestamp(self: *Self, arena: std.mem.Allocator, data: T, timestamp: i64) !void {
             const payload = switch (data) {
-                inline else => |p| try p.walSerialize(arena),
+                inline else => |p| try walSerialize(@TypeOf(p), p, arena),
             };
 
             const timestamp_size = @sizeOf(i64);
@@ -212,7 +214,7 @@ pub fn Wal(comptime T: type, version: u8) type {
                 const payload = content[10..];
 
                 const data = switch (tag) {
-                    inline else => |t| @unionInit(T, @tagName(t), try @FieldType(T, @tagName(t)).walDeserialize(arena, payload)),
+                    inline else => |t| @unionInit(T, @tagName(t), try walDeserialize(@FieldType(T, @tagName(t)), arena, payload)),
                 };
 
                 try list.append(arena, .{ .timestamp = timestamp, .data = data });
