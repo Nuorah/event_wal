@@ -1,6 +1,6 @@
 .{
     .name = .ligma_db,
-    .version = "0.2.0",
+    .version = "0.3.0",
     .fingerprint = 0xce4cb88921ba9f7d,
     .paths = .{
         "src",
