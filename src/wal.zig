@@ -182,8 +182,7 @@ pub fn Wal(comptime T: type, version: u8) type {
             var reader_buffer: [4096]u8 = undefined;
             var reader = self.file.reader(&reader_buffer);
 
-            // skip past LIGMA header
-            reader.interface.toss(HEADER_SIZE);
+            _ = try reader.interface.take(HEADER_SIZE);
 
             while (true) {
                 // read len
