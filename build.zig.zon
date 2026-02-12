@@ -1,7 +1,7 @@
 .{
-    .name = .event_wal,
+    .name = .ligma_db,
     .version = "0.1.0",
-    .fingerprint = 0x87d215814da56aa3,
+    .fingerprint = 0xce4cb88921ba9f7d,
     .paths = .{
         "src",
         "build.zig",
