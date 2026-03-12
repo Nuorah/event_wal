@@ -1,89 +1,82 @@
 const std = @import("std");
 
 pub fn walSerialize(comptime T: type, self: T, arena: std.mem.Allocator) ![]const u8 {
-    // first pass: compute total size
-    var size: usize = 0;
+    var aw: std.Io.Writer.Allocating = .init(arena);
+    const w = &aw.writer;
+
     inline for (std.meta.fields(T)) |field| {
-        switch (@typeInfo(field.type)) {
-            .bool => size += 1,
-            .int => size += @sizeOf(field.type),
-            .@"enum" => |e| size += @sizeOf(e.tag_type),
-            .pointer => |ptr| {
-                if (ptr.size == .slice and ptr.child == u8) {
-                    size += @sizeOf(u16) + @field(self, field.name).len;
-                } else {
-                    @compileError("unsupported field type: " ++ @typeName(field.type));
-                }
-            },
-            else => @compileError("unsupported field type: " ++ @typeName(field.type)),
-        }
+        try serializeValue(field.type, @field(self, field.name), w);
     }
 
-    const buf = try arena.alloc(u8, size);
-    var offset: usize = 0;
+    return aw.written();
+}
 
-    // second pass: write fields
-    inline for (std.meta.fields(T)) |field| {
-        const value = @field(self, field.name);
-        switch (@typeInfo(field.type)) {
-            .bool => {
-                buf[offset] = @intFromBool(value);
-                offset += 1;
-            },
-            .int => {
-                const bytes = @sizeOf(field.type);
-                @as(*align(1) field.type, @ptrCast(buf[offset..][0..bytes])).* = std.mem.nativeToLittle(field.type, value);
-                offset += bytes;
-            },
-            .@"enum" => |e| {
-                const bytes = @sizeOf(e.tag_type);
-                @as(*align(1) e.tag_type, @ptrCast(buf[offset..][0..bytes])).* = std.mem.nativeToLittle(e.tag_type, @intFromEnum(value));
-                offset += bytes;
-            },
-            .pointer => {
-                const len: u16 = @intCast(value.len);
-                @as(*align(1) u16, @ptrCast(buf[offset..][0..2])).* = std.mem.nativeToLittle(u16, len);
-                offset += 2;
-                @memcpy(buf[offset..][0..value.len], value);
-                offset += value.len;
-            },
-            else => unreachable,
-        }
+fn serializeValue(comptime T: type, value: T, w: *std.Io.Writer) !void {
+    switch (@typeInfo(T)) {
+        .bool => try w.writeByte(@intFromBool(value)),
+        .int => try w.writeInt(T, value, .little),
+        .@"enum" => |e| {
+            const IntType = std.meta.Int(.unsigned, @sizeOf(e.tag_type) * 8);
+            try w.writeInt(IntType, @intFromEnum(value), .little);
+        },
+        .optional => |opt| {
+            if (value) |val| {
+                try w.writeByte(1);
+                try serializeValue(opt.child, val, w);
+            } else {
+                try w.writeByte(0);
+            }
+        },
+        .pointer => |ptr| {
+            if (ptr.size == .slice and ptr.child == u8) {
+                try w.writeInt(u16, @intCast(value.len), .little);
+                try w.writeAll(value);
+            } else {
+                @compileError("unsupported field type: " ++ @typeName(T));
+            }
+        },
+        else => @compileError("unsupported field type: " ++ @typeName(T)),
     }
-
-    return buf;
 }
 
 pub fn walDeserialize(comptime T: type, arena: std.mem.Allocator, payload: []const u8) !T {
+    var stream = std.io.fixedBufferStream(payload);
+    const r = stream.reader();
+    return deserializeStruct(T, arena, r);
+}
+
+fn deserializeStruct(comptime T: type, arena: std.mem.Allocator, r: anytype) !T {
     var result: T = undefined;
-    var offset: usize = 0;
-
     inline for (std.meta.fields(T)) |field| {
-        switch (@typeInfo(field.type)) {
-            .bool => {
-                @field(result, field.name) = payload[offset] != 0;
-                offset += 1;
-            },
-            .int => {
-                const bytes = @sizeOf(field.type);
-                @field(result, field.name) = std.mem.littleToNative(field.type, @as(*align(1) const field.type, @ptrCast(payload[offset..][0..bytes])).*);
-                offset += bytes;
-            },
-            .@"enum" => |e| {
-                const bytes = @sizeOf(e.tag_type);
-                const raw = std.mem.littleToNative(e.tag_type, @as(*align(1) const e.tag_type, @ptrCast(payload[offset..][0..bytes])).*);
-                @field(result, field.name) = std.meta.intToEnum(field.type, raw) catch return error.InvalidEnumValue;
-                offset += bytes;
-            },
-            .pointer => {
-                const len = std.mem.littleToNative(u16, @as(*align(1) const u16, @ptrCast(payload[offset..][0..2])).*);
-                offset += 2;
-                @field(result, field.name) = try arena.dupe(u8, payload[offset..][0..len]);
-                offset += len;
-            },
-            else => unreachable,
-        }
+        @field(result, field.name) = try deserializeValue(field.type, arena, r);
     }
-
     return result;
+}
+
+fn deserializeValue(comptime T: type, arena: std.mem.Allocator, r: anytype) !T {
+    switch (@typeInfo(T)) {
+        .bool => return (try r.readByte()) != 0,
+        .int => return r.readInt(T, .little),
+        .@"enum" => |e| {
+            const IntType = std.meta.Int(.unsigned, @sizeOf(e.tag_type) * 8);
+            const raw = try r.readInt(IntType, .little);
+            return std.meta.intToEnum(T, raw) catch error.InvalidEnumValue;
+        },
+        .optional => |opt| {
+            const present = try r.readByte();
+            if (present == 0) return null;
+            return try deserializeValue(opt.child, arena, r);
+        },
+        .pointer => |ptr| {
+            if (ptr.size == .slice and ptr.child == u8) {
+                const len = try r.readInt(u16, .little);
+                const s = try arena.alloc(u8, len);
+                try r.readNoEof(s);
+                return s;
+            } else {
+                @compileError("unsupported field type: " ++ @typeName(T));
+            }
+        },
+        else => @compileError("unsupported field type: " ++ @typeName(T)),
+    }
 }
