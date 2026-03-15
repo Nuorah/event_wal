@@ -31,8 +31,18 @@ fn serializeValue(comptime T: type, value: T, w: *std.Io.Writer) !void {
             if (ptr.size == .slice and ptr.child == u8) {
                 try w.writeInt(u16, @intCast(value.len), .little);
                 try w.writeAll(value);
+            } else if (ptr.size == .slice) {
+                try w.writeInt(u16, @intCast(value.len), .little);
+                for (value) |item| {
+                    try serializeValue(ptr.child, item, w);
+                }
             } else {
                 @compileError("unsupported field type: " ++ @typeName(T));
+            }
+        },
+        .@"struct" => {
+            inline for (std.meta.fields(T)) |field| {
+                try serializeValue(field.type, @field(value, field.name), w);
             }
         },
         else => @compileError("unsupported field type: " ++ @typeName(T)),
@@ -73,9 +83,23 @@ fn deserializeValue(comptime T: type, arena: std.mem.Allocator, r: anytype) !T {
                 const s = try arena.alloc(u8, len);
                 try r.readNoEof(s);
                 return s;
+            } else if (ptr.size == .slice) {
+                const len = try r.readInt(u16, .little);
+                const buf = try arena.alloc(ptr.child, len);
+                for (buf) |*item| {
+                    item.* = try deserializeValue(ptr.child, arena, r);
+                }
+                return buf;
             } else {
                 @compileError("unsupported field type: " ++ @typeName(T));
             }
+        },
+        .@"struct" => {
+            var result: T = undefined;
+            inline for (std.meta.fields(T)) |field| {
+                @field(result, field.name) = try deserializeValue(field.type, arena, r);
+            }
+            return result;
         },
         else => @compileError("unsupported field type: " ++ @typeName(T)),
     }
