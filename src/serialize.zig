@@ -15,6 +15,15 @@ fn serializeValue(comptime T: type, value: T, w: *std.Io.Writer) !void {
     switch (@typeInfo(T)) {
         .bool => try w.writeByte(@intFromBool(value)),
         .int => try w.writeInt(T, value, .little),
+        .array => |arr| {
+            for (value) |item| {
+                try serializeValue(arr.child, item, w);
+            }
+        },
+        .float => {
+            const IntType = std.meta.Int(.unsigned, @bitSizeOf(T));
+            try w.writeInt(IntType, @bitCast(value), .little);
+        },
         .@"enum" => |e| {
             const IntType = std.meta.Int(.unsigned, @sizeOf(e.tag_type) * 8);
             try w.writeInt(IntType, @intFromEnum(value), .little);
@@ -66,7 +75,19 @@ fn deserializeStruct(comptime T: type, arena: std.mem.Allocator, r: anytype) !T 
 fn deserializeValue(comptime T: type, arena: std.mem.Allocator, r: anytype) !T {
     switch (@typeInfo(T)) {
         .bool => return (try r.readByte()) != 0,
+        .float => {
+            const IntType = std.meta.Int(.unsigned, @bitSizeOf(T));
+            const raw = try r.readInt(IntType, .little);
+            return @bitCast(raw);
+        },
         .int => return r.readInt(T, .little),
+        .array => |arr| {
+            var result: T = undefined;
+            for (&result) |*item| {
+                item.* = try deserializeValue(arr.child, arena, r);
+            }
+            return result;
+        },
         .@"enum" => |e| {
             const IntType = std.meta.Int(.unsigned, @sizeOf(e.tag_type) * 8);
             const raw = try r.readInt(IntType, .little);
