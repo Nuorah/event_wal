@@ -11,6 +11,7 @@ pub fn Wal(comptime T: type, version: u8) type {
         const HEADER_SIZE = MAGIC.len + @sizeOf(u8);
 
         file: std.fs.File,
+        write_offset: u64,
 
         pub fn init(path: []const u8, arena: std.mem.Allocator) !Self {
             const file = std.fs.cwd().openFile(path, .{ .mode = .read_write }) catch |err| {
@@ -25,7 +26,10 @@ pub fn Wal(comptime T: type, version: u8) type {
                     try writer.interface.writeAll(&buf);
                     try writer.interface.flush();
                     try new_file.sync();
-                    return .{ .file = try std.fs.cwd().openFile(path, .{ .mode = .read_write }) };
+                    return .{
+                        .file = try std.fs.cwd().openFile(path, .{ .mode = .read_write }),
+                        .write_offset = try new_file.getEndPos(),
+                    };
                 }
                 return err;
             };
@@ -49,12 +53,15 @@ pub fn Wal(comptime T: type, version: u8) type {
                 }
             } else {
                 // TODO: trigger migration from JSON to binary
-                file.close();
+                defer file.close();
                 try migrateJsonToBinary(path, arena);
-                return .{ .file = try std.fs.cwd().openFile(path, .{ .mode = .read_write }) };
+                return .{
+                    .file = try std.fs.cwd().openFile(path, .{ .mode = .read_write }),
+                    .write_offset = try file.getEndPos(),
+                };
             }
 
-            return .{ .file = file };
+            return .{ .file = file, .write_offset = try file.getEndPos() };
         }
 
         pub fn deinit(self: *Self) void {
@@ -100,33 +107,13 @@ pub fn Wal(comptime T: type, version: u8) type {
             try tmp_file.sync();
 
             // write each event as binary
-            var tmp_wal: Self = .{ .file = tmp_file };
+            var tmp_wal: Self = .{ .file = tmp_file, .write_offset = try tmp_file.getEndPos() };
             for (events.items) |event| {
                 try tmp_wal.appendBinaryWithTimestamp(arena, event.data, event.timestamp);
             }
 
             // atomic rename
             try std.fs.cwd().rename(tmp_path, path);
-        }
-
-        pub fn append(self: *Self, arena: std.mem.Allocator, item: T) !void {
-            var writer_buffer: [4096]u8 = undefined;
-            var writer = self.file.writer(&writer_buffer);
-            try writer.seekTo(try self.file.getEndPos());
-
-            var alloc_writer: std.io.Writer.Allocating = .init(arena);
-            defer alloc_writer.deinit();
-
-            var json_writer: std.json.Stringify = .{
-                .writer = &alloc_writer.writer,
-                .options = .{ .whitespace = .minified },
-            };
-
-            try json_writer.write(item);
-            try writer.interface.writeAll(alloc_writer.written());
-            try writer.interface.writeByte('\n');
-            try writer.interface.flush();
-            try self.file.sync();
         }
 
         fn appendBinaryWithTimestamp(self: *Self, arena: std.mem.Allocator, data: T, timestamp: i64) !void {
@@ -139,6 +126,7 @@ pub fn Wal(comptime T: type, version: u8) type {
             const record_header_size = timestamp_size + tag_size;
             const content_len = record_header_size + payload.len;
             if (content_len > std.math.maxInt(u16)) return error.PayloadTooLarge;
+
             const content = try arena.alloc(u8, content_len);
             std.mem.writeInt(i64, content[0..8], timestamp, .little);
             std.mem.writeInt(u16, content[8..10], @intFromEnum(data), .little);
@@ -146,25 +134,71 @@ pub fn Wal(comptime T: type, version: u8) type {
 
             const crc = std.hash.crc.Crc32.hash(content);
 
+            // build one contiguous record: len(2) + content(N) + crc(4)
+            const record_len = 2 + content_len + 4;
+            const record = try arena.alloc(u8, record_len);
+            std.mem.writeInt(u16, record[0..2], @intCast(content_len), .little);
+            @memcpy(record[2..][0..content_len], content);
+            std.mem.writeInt(u32, record[2 + content_len ..][0..4], crc, .little);
+
             var writer_buffer: [128]u8 = undefined;
             var writer = self.file.writer(&writer_buffer);
-            try writer.seekTo(try self.file.getEndPos());
-
-            var len_bytes: [2]u8 = undefined;
-            std.mem.writeInt(u16, &len_bytes, @intCast(content_len), .little);
-            try writer.interface.writeAll(&len_bytes);
-            try writer.interface.writeAll(content);
-
-            var crc_bytes: [4]u8 = undefined;
-            std.mem.writeInt(u32, &crc_bytes, crc, .little);
-            try writer.interface.writeAll(&crc_bytes);
-
+            try writer.seekTo(self.write_offset);
+            try writer.interface.writeAll(record);
             try writer.interface.flush();
             try self.file.sync();
+
+            self.write_offset += record_len;
+        }
+
+        pub fn appendBinaryWithTimestampAsync(
+            self: *Self,
+            arena: std.mem.Allocator,
+            io: anytype,
+            data: T,
+            timestamp: i64,
+        ) !void {
+            const payload = switch (data) {
+                inline else => |p| try walSerialize(@TypeOf(p), p, arena),
+            };
+
+            const timestamp_size = @sizeOf(i64);
+            const tag_size = @sizeOf(u16);
+            const record_header_size = timestamp_size + tag_size;
+            const content_len = record_header_size + payload.len;
+            if (content_len > std.math.maxInt(u16)) return error.PayloadTooLarge;
+
+            const record_len = 2 + content_len + 4;
+            const record = try arena.alloc(u8, record_len);
+
+            // len
+            std.mem.writeInt(u16, record[0..2], @intCast(content_len), .little);
+
+            // content: timestamp + tag + payload
+            std.mem.writeInt(i64, record[2..10], timestamp, .little);
+            std.mem.writeInt(u16, record[10..12], @intFromEnum(data), .little);
+            @memcpy(record[12..][0..payload.len], payload);
+
+            // crc over content only
+            const crc = std.hash.crc.Crc32.hash(record[2..][0..content_len]);
+            std.mem.writeInt(u32, record[2 + content_len ..][0..4], crc, .little);
+
+            // claim our slot BEFORE yielding
+            const offset = self.write_offset;
+            self.write_offset += record_len;
+
+            // async write + fsync through io_uring, this yields
+            _ = try io.do_write_synced(self.file.handle, record, offset);
         }
 
         pub fn appendBinary(self: *Self, arena: std.mem.Allocator, data: T) !void {
             try self.appendBinaryWithTimestamp(arena, data, std.time.microTimestamp());
+        }
+
+        pub fn appendBinaryAsync(self: *Self, allocator: std.mem.Allocator, io: anytype, data: T) !void {
+            var arena = std.heap.ArenaAllocator.init(allocator);
+            defer arena.deinit();
+            try self.appendBinaryWithTimestampAsync(arena.allocator(), io, data, std.time.microTimestamp());
         }
 
         pub fn readAll(self: *Self, arena: std.mem.Allocator) !std.ArrayList(T) {
