@@ -5,11 +5,13 @@ pub fn Database(comptime EventData: type, comptime StoragesType: type, comptime 
     return struct {
         wal: Wal(EventData, wal_version),
         allocator: std.mem.Allocator,
+        io: std.Io,
 
-        pub fn init(allocator: std.mem.Allocator, path: []const u8) !@This() {
+        pub fn init(io: std.Io, allocator: std.mem.Allocator, path: []const u8) !@This() {
             return .{
                 .allocator = allocator,
-                .wal = try Wal(EventData, wal_version).init(path, allocator),
+                .wal = try Wal(EventData, wal_version).init(io, path, allocator),
+                .io = io,
             };
         }
 
@@ -26,26 +28,19 @@ pub fn Database(comptime EventData: type, comptime StoragesType: type, comptime 
             std.debug.print("Loading {d} events.\n", .{events.items.len});
             for (events.items) |evt| {
                 switch (evt.data) {
-                    // apply still uses self.allocator for the dupe into the hashmap
-                    inline else => |payload| try payload.apply(self.allocator, storages),
+                    // apply still uses self.allocator for the dupe into the hashmap and the put into the hashmap
+                    inline else => |payload| try payload.apply(self.io, self.allocator, storages),
                 }
             }
             // replay_arena dies here
             // all the deserialized event payloads get freed in one shot
-            // the duped strings in the hashmap survive because they're on self.allocator
-        }
-
-        pub fn appendEvent(self: *@This(), data: EventData, storages: *StoragesType) !void {
-            try self.wal.appendBinary(self.allocator, data);
-            switch (data) {
-                inline else => |payload| try payload.apply(self.allocator, storages),
-            }
+            // the entities in the hashmap survive because they're on self.allocator
         }
 
         pub fn appendEventAsync(self: *@This(), io: anytype, data: EventData, storages: *StoragesType) !void {
-            try self.wal.appendBinaryAsync(self.allocator, io, data);
+            try self.wal.appendBinaryAsync(self.allocator, io, data, self.io);
             switch (data) {
-                inline else => |payload| try payload.apply(self.allocator, storages),
+                inline else => |payload| try payload.apply(self.io, self.allocator, storages),
             }
         }
     };

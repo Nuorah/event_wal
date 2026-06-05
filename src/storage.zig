@@ -3,11 +3,11 @@ const std = @import("std");
 pub fn Storage(comptime K: type, comptime V: type) type {
     return struct {
         const Self = @This();
-        entities: std.AutoArrayHashMap(K, V),
-        mutex: std.Thread.Mutex = .{},
+        entities: std.array_hash_map.Auto(K, V),
+        mutex: std.Io.Mutex,
 
-        pub fn init(allocator: std.mem.Allocator) Self {
-            return .{ .entities = std.AutoArrayHashMap(K, V).init(allocator) };
+        pub fn init() Self {
+            return .{ .entities = .empty, .mutex = .init };
         }
 
         pub fn deinit(self: *Self) void {

@@ -10,25 +10,27 @@ pub fn Wal(comptime T: type, version: u8) type {
         const MAGIC = [_]u8{ 'L', 'I', 'G', 'M', 'A' };
         const HEADER_SIZE = MAGIC.len + @sizeOf(u8);
 
-        file: std.fs.File,
+        file: std.Io.File,
         write_offset: u64,
+        io: std.Io,
 
-        pub fn init(path: []const u8, arena: std.mem.Allocator) !Self {
-            const file = std.fs.cwd().openFile(path, .{ .mode = .read_write }) catch |err| {
+        pub fn init(io: std.Io, path: []const u8, arena: std.mem.Allocator) !Self {
+            const file = std.Io.Dir.cwd().openFile(io, path, .{ .mode = .read_write }) catch |err| {
                 if (err == error.FileNotFound) {
-                    const new_file = try std.fs.cwd().createFile(path, .{});
-                    defer new_file.close();
+                    const new_file = try std.Io.Dir.cwd().createFile(io, path, .{});
+                    defer new_file.close(io);
                     var writer_buffer: [128]u8 = undefined;
-                    var writer = new_file.writer(&writer_buffer);
+                    var writer = new_file.writer(io, &writer_buffer);
                     var buf: [HEADER_SIZE]u8 = undefined;
                     @memcpy(buf[0..MAGIC.len], &MAGIC);
                     buf[MAGIC.len] = version;
                     try writer.interface.writeAll(&buf);
                     try writer.interface.flush();
-                    try new_file.sync();
+                    try new_file.sync(io);
                     return .{
-                        .file = try std.fs.cwd().openFile(path, .{ .mode = .read_write }),
-                        .write_offset = try new_file.getEndPos(),
+                        .file = try std.Io.Dir.cwd().openFile(io, path, .{ .mode = .read_write }),
+                        .write_offset = try new_file.length(io),
+                        .io = io,
                     };
                 }
                 return err;
@@ -36,16 +38,16 @@ pub fn Wal(comptime T: type, version: u8) type {
 
             var header_buf: [HEADER_SIZE]u8 = undefined;
             var reader_buffer: [HEADER_SIZE]u8 = undefined;
-            var reader = file.reader(&reader_buffer);
+            var reader = file.reader(io, &reader_buffer);
             const bytes_read = try reader.interface.readSliceShort(&header_buf);
 
             var writer_buffer: [128]u8 = undefined;
-            var writer = file.writer(&writer_buffer);
+            var writer = file.writer(io, &writer_buffer);
             if (bytes_read == 0) {
                 try writer.interface.writeAll(&MAGIC);
                 try writer.interface.writeByte(version);
                 try writer.interface.flush();
-                try file.sync();
+                try file.sync(io);
             } else if (bytes_read >= HEADER_SIZE and std.mem.eql(u8, header_buf[0..MAGIC.len], &MAGIC)) {
                 if (header_buf[MAGIC.len] != version) {
                     // TODO: don't forget to write a migration path before bumping version
@@ -53,28 +55,29 @@ pub fn Wal(comptime T: type, version: u8) type {
                 }
             } else {
                 // TODO: trigger migration from JSON to binary
-                defer file.close();
-                try migrateJsonToBinary(path, arena);
+                defer file.close(io);
+                try migrateJsonToBinary(io, path, arena);
                 return .{
-                    .file = try std.fs.cwd().openFile(path, .{ .mode = .read_write }),
-                    .write_offset = try file.getEndPos(),
+                    .file = try std.Io.Dir.cwd().openFile(io, path, .{ .mode = .read_write }),
+                    .write_offset = try file.length(io),
+                    .io = io,
                 };
             }
 
-            return .{ .file = file, .write_offset = try file.getEndPos() };
+            return .{ .file = file, .write_offset = try file.length(io), .io = io };
         }
 
         pub fn deinit(self: *Self) void {
-            self.file.close();
+            self.file.close(self.io);
         }
 
-        fn migrateJsonToBinary(path: []const u8, arena: std.mem.Allocator) !void {
+        fn migrateJsonToBinary(io: std.Io, path: []const u8, arena: std.mem.Allocator) !void {
             // read old JSON file
-            const old_file = try std.fs.cwd().openFile(path, .{ .mode = .read_only });
-            defer old_file.close();
+            const old_file = try std.Io.Dir.cwd().openFile(io, path, .{ .mode = .read_only });
+            defer old_file.close(io);
 
             var reader_buffer: [4096]u8 = undefined;
-            var reader = old_file.reader(&reader_buffer);
+            var reader = old_file.reader(io, &reader_buffer);
 
             var events: std.ArrayList(Event(T)) = .empty;
 
@@ -96,24 +99,24 @@ pub fn Wal(comptime T: type, version: u8) type {
 
             // write to tmp file
             const tmp_path = try std.fmt.allocPrint(arena, "{s}.tmp", .{path});
-            const tmp_file = try std.fs.cwd().createFile(tmp_path, .{});
-            defer tmp_file.close();
+            const tmp_file = try std.Io.Dir.cwd().createFile(io, tmp_path, .{});
+            defer tmp_file.close(io);
             var writer_buffer: [128]u8 = undefined;
-            var writer = tmp_file.writer(&writer_buffer);
+            var writer = tmp_file.writer(io, &writer_buffer);
 
             try writer.interface.writeAll(&MAGIC);
             try writer.interface.writeByte(version);
             try writer.interface.flush();
-            try tmp_file.sync();
+            try tmp_file.sync(io);
 
             // write each event as binary
-            var tmp_wal: Self = .{ .file = tmp_file, .write_offset = try tmp_file.getEndPos() };
+            var tmp_wal: Self = .{ .file = tmp_file, .write_offset = try tmp_file.length(io), .io = io };
             for (events.items) |event| {
                 try tmp_wal.appendBinaryWithTimestamp(arena, event.data, event.timestamp);
             }
 
             // atomic rename
-            try std.fs.cwd().rename(tmp_path, path);
+            try std.Io.Dir.cwd().rename(tmp_path, std.Io.Dir.cwd(), path, io);
         }
 
         fn appendBinaryWithTimestamp(self: *Self, arena: std.mem.Allocator, data: T, timestamp: i64) !void {
@@ -142,11 +145,11 @@ pub fn Wal(comptime T: type, version: u8) type {
             std.mem.writeInt(u32, record[2 + content_len ..][0..4], crc, .little);
 
             var writer_buffer: [128]u8 = undefined;
-            var writer = self.file.writer(&writer_buffer);
+            var writer = self.file.writer(self.io, &writer_buffer);
             try writer.seekTo(self.write_offset);
             try writer.interface.writeAll(record);
             try writer.interface.flush();
-            try self.file.sync();
+            try self.file.sync(self.io);
 
             self.write_offset += record_len;
         }
@@ -195,10 +198,11 @@ pub fn Wal(comptime T: type, version: u8) type {
             try self.appendBinaryWithTimestamp(arena, data, std.time.microTimestamp());
         }
 
-        pub fn appendBinaryAsync(self: *Self, allocator: std.mem.Allocator, io: anytype, data: T) !void {
+        pub fn appendBinaryAsync(self: *Self, allocator: std.mem.Allocator, io: anytype, data: T, io_sys: std.Io) !void {
             var arena = std.heap.ArenaAllocator.init(allocator);
             defer arena.deinit();
-            try self.appendBinaryWithTimestampAsync(arena.allocator(), io, data, std.time.microTimestamp());
+            const now = std.Io.Timestamp.now(io_sys, std.Io.Clock.real).toMicroseconds();
+            try self.appendBinaryWithTimestampAsync(arena.allocator(), io, data, now);
         }
 
         pub fn readAll(self: *Self, arena: std.mem.Allocator) !std.ArrayList(T) {
@@ -218,7 +222,7 @@ pub fn Wal(comptime T: type, version: u8) type {
         pub fn readAllBinary(self: *Self, arena: std.mem.Allocator) !std.ArrayList(Event(T)) {
             var list: std.ArrayList(Event(T)) = .empty;
             var reader_buffer: [4096]u8 = undefined;
-            var reader = self.file.reader(&reader_buffer);
+            var reader = self.file.reader(self.io, &reader_buffer);
 
             _ = try reader.interface.take(HEADER_SIZE);
 
@@ -244,7 +248,7 @@ pub fn Wal(comptime T: type, version: u8) type {
 
                 // parse tag and deserialize payload
                 const tag_int = std.mem.readInt(u16, content[8..10], .little);
-                const tag = std.meta.intToEnum(@typeInfo(T).@"union".tag_type.?, tag_int) catch return error.UnknownTag;
+                const tag = std.enums.fromInt(@typeInfo(T).@"union".tag_type.?, tag_int) orelse return error.UnknownTag;
                 const payload = content[10..];
 
                 const data = switch (tag) {

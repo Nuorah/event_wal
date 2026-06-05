@@ -59,12 +59,11 @@ fn serializeValue(comptime T: type, value: T, w: *std.Io.Writer) !void {
 }
 
 pub fn walDeserialize(comptime T: type, arena: std.mem.Allocator, payload: []const u8) !T {
-    var stream = std.io.fixedBufferStream(payload);
-    const r = stream.reader();
-    return deserializeStruct(T, arena, r);
+    var r: std.Io.Reader = .fixed(payload);
+    return deserializeStruct(T, arena, &r);
 }
 
-fn deserializeStruct(comptime T: type, arena: std.mem.Allocator, r: anytype) !T {
+fn deserializeStruct(comptime T: type, arena: std.mem.Allocator, r: *std.Io.Reader) !T {
     var result: T = undefined;
     inline for (std.meta.fields(T)) |field| {
         @field(result, field.name) = try deserializeValue(field.type, arena, r);
@@ -72,15 +71,15 @@ fn deserializeStruct(comptime T: type, arena: std.mem.Allocator, r: anytype) !T 
     return result;
 }
 
-fn deserializeValue(comptime T: type, arena: std.mem.Allocator, r: anytype) !T {
+fn deserializeValue(comptime T: type, arena: std.mem.Allocator, r: *std.Io.Reader) !T {
     switch (@typeInfo(T)) {
-        .bool => return (try r.readByte()) != 0,
+        .bool => return (try r.takeByte()) != 0,
         .float => {
             const IntType = std.meta.Int(.unsigned, @bitSizeOf(T));
-            const raw = try r.readInt(IntType, .little);
+            const raw = try r.takeInt(IntType, .little);
             return @bitCast(raw);
         },
-        .int => return r.readInt(T, .little),
+        .int => return r.takeInt(T, .little),
         .array => |arr| {
             var result: T = undefined;
             for (&result) |*item| {
@@ -90,22 +89,22 @@ fn deserializeValue(comptime T: type, arena: std.mem.Allocator, r: anytype) !T {
         },
         .@"enum" => |e| {
             const IntType = std.meta.Int(.unsigned, @sizeOf(e.tag_type) * 8);
-            const raw = try r.readInt(IntType, .little);
-            return std.meta.intToEnum(T, raw) catch error.InvalidEnumValue;
+            const raw = try r.takeInt(IntType, .little);
+            return std.enums.fromInt(T, raw) orelse error.InvalidEnumValue;
         },
         .optional => |opt| {
-            const present = try r.readByte();
+            const present = try r.takeByte();
             if (present == 0) return null;
             return try deserializeValue(opt.child, arena, r);
         },
         .pointer => |ptr| {
             if (ptr.size == .slice and ptr.child == u8) {
-                const len = try r.readInt(u16, .little);
+                const len = try r.takeInt(u16, .little);
                 const s = try arena.alloc(u8, len);
-                try r.readNoEof(s);
+                try r.readSliceAll(s);
                 return s;
             } else if (ptr.size == .slice) {
-                const len = try r.readInt(u16, .little);
+                const len = try r.takeInt(u16, .little);
                 const buf = try arena.alloc(ptr.child, len);
                 for (buf) |*item| {
                     item.* = try deserializeValue(ptr.child, arena, r);
